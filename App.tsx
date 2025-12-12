@@ -1,8 +1,19 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Move, GameResult, ScoreState } from './types';
 import { MoveButton } from './components/MoveButton';
+import { db } from './firebase';
+import { doc, onSnapshot, updateDoc, setDoc, increment } from 'firebase/firestore';
+
+const VIDEO_1_URL = "https://storage.cloud.google.com/stone7351/video/1.mp4";
+const VIDEO_2_URL = "https://storage.cloud.google.com/stone7351/video/2.mp4";
+const VIDEO_3_URL = "https://storage.cloud.google.com/stone7351/video/3.mp4";
+const VIDEO_4_URL = "https://storage.cloud.google.com/stone7351/video/4.mp4";
+const VIDEO_5_URL = "https://storage.cloud.google.com/stone7351/video/5.mp4";
+const VIDEO_6_URL = "https://storage.cloud.google.com/stone7351/video/6.mp4";
+const VIDEO_7_URL = "https://storage.cloud.google.com/stone7351/video/7.mp4";
 
 const App: React.FC = () => {
+  const [currentRound, setCurrentRound] = useState<number>(1); // 1, 2, 3...
   const [score, setScore] = useState<ScoreState>({ player: 0, cpu: 0 });
   const [playerMove, setPlayerMove] = useState<Move | null>(null);
   const [cpuMove, setCpuMove] = useState<Move | null>(null);
@@ -10,9 +21,24 @@ const App: React.FC = () => {
   const [isAnimating, setIsAnimating] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
   
-  // Track if the special video has been shown
+  // Video & Event State
   const [hasSeenVideo, setHasSeenVideo] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
+  const [currentVideoUrl, setCurrentVideoUrl] = useState<string>(VIDEO_1_URL);
+  const [showHandOverlay, setShowHandOverlay] = useState(false);
+  const [showPunishmentUI, setShowPunishmentUI] = useState(false);
+  const [showNextRoundUI, setShowNextRoundUI] = useState(false);
+
+  // Ending Sequence State
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [showRefusePay, setShowRefusePay] = useState(false);
+  const [showCredits, setShowCredits] = useState(false);
+  const [showFinalScreen, setShowFinalScreen] = useState(false);
+
+  // Global Stats State
+  const [globalStats, setGlobalStats] = useState({ totalGames: 0, cpuWins: 0 });
+  
+  const resetTimerRef = useRef<number | null>(null);
 
   // Background blobs for aesthetic
   const blobs = [
@@ -20,6 +46,80 @@ const App: React.FC = () => {
     { color: 'bg-blue-300', bottom: '-10%', right: '-10%', size: 'w-80 h-80' },
     { color: 'bg-yellow-200', top: '40%', left: '30%', size: 'w-64 h-64' },
   ];
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
+  // Handle Credits Timer
+  useEffect(() => {
+    if (showCredits) {
+      const timer = setTimeout(() => {
+        setShowCredits(false);
+        setShowFinalScreen(true);
+      }, 5000); // 5 seconds scrolling
+      return () => clearTimeout(timer);
+    }
+  }, [showCredits]);
+
+  // Firebase Global Stats Subscription
+  useEffect(() => {
+    const statsDocRef = doc(db, 'RockPaper_Stats', 'summary');
+    const unsubscribe = onSnapshot(
+      statsDocRef, 
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setGlobalStats({
+              totalGames: data.totalGames || 0,
+              cpuWins: data.cpuWins || 0
+          });
+        } else {
+          // Initialize if missing
+          // Use catch to prevent unhandled promise rejection if permissions are missing
+          setDoc(statsDocRef, { totalGames: 0, cpuWins: 0 }).catch(err => {
+             console.warn("Failed to initialize stats (likely permission issue):", err);
+          });
+        }
+      },
+      (error) => {
+        // Gracefully handle permission errors
+        console.warn("Firebase stats subscription error (likely permission issue):", error.message);
+      }
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const updateGlobalStats = async (gameResult: GameResult) => {
+    const statsDocRef = doc(db, 'RockPaper_Stats', 'summary');
+    const updates: any = {
+      totalGames: increment(1)
+    };
+    // Player Lose = CPU Win
+    if (gameResult === GameResult.Lose) { 
+      updates.cpuWins = increment(1);
+    }
+    
+    try {
+        await updateDoc(statsDocRef, updates);
+    } catch (e: any) {
+        if (e.code === 'not-found') {
+             try {
+               await setDoc(statsDocRef, { 
+                   totalGames: 1, 
+                   cpuWins: gameResult === GameResult.Lose ? 1 : 0 
+               });
+             } catch (createError) {
+               console.warn("Failed to create stats doc:", createError);
+             }
+        } else {
+            console.warn("Failed to update stats:", e);
+        }
+    }
+  };
 
   const determineWinner = (pMove: Move, cMove: Move): GameResult => {
     if (pMove === cMove) return GameResult.Draw;
@@ -34,38 +134,66 @@ const App: React.FC = () => {
   };
 
   const handleMove = (move: Move) => {
-    if (isAnimating || showVideo) return;
+    if (isAnimating || showVideo || showPunishmentUI || showNextRoundUI || showPaywall || showCredits || showFinalScreen) return;
+
+    // Clear any pending reset
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
 
     setPlayerMove(move);
     setCpuMove(null);
     setResult(null);
     setShowConfetti(false);
 
-    // SPECIAL LOGIC: If player chooses Rock and hasn't seen the video yet
-    // Play the video FIRST, then show result after video ends.
-    if (move === Move.Rock && !hasSeenVideo) {
+    // ROUND 1 SPECIAL LOGIC: Rock Wins triggers video
+    if (currentRound === 1 && move === Move.Rock && !hasSeenVideo) {
+      setCurrentVideoUrl(VIDEO_1_URL);
       setShowVideo(true);
-      return; // Stop here, wait for video to end
+      setShowHandOverlay(false);
+      return; 
     }
 
-    // NORMAL LOGIC
+    // ROUND 2 SPECIAL LOGIC: Paper Wins triggers video
+    if (currentRound === 2 && move === Move.Paper && !hasSeenVideo) {
+      setCurrentVideoUrl(VIDEO_3_URL);
+      setShowVideo(true);
+      setShowHandOverlay(false);
+      return;
+    }
+
+    // ROUND 3 SPECIAL LOGIC: Rock Wins triggers video
+    if (currentRound === 3 && move === Move.Rock && !hasSeenVideo) {
+      setCurrentVideoUrl(VIDEO_5_URL);
+      setShowVideo(true);
+      setShowHandOverlay(false);
+      return;
+    }
+
+    // NORMAL LOGIC (Which forces loss for R1-R3 if special move wasn't picked)
     setIsAnimating(true);
     
     // Simulate "thinking" time
     setTimeout(() => {
       let cMove: Move;
-
-      if (move === Move.Rock) {
-        // Rock always wins
-        cMove = Move.Scissors;
+      let gameResult: GameResult;
+      
+      // Algorithm: For Rounds 1-3, if the user didn't pick the winning move (caught above),
+      // the CPU MUST play the counter move to ensure the user loses.
+      if (currentRound <= 3) {
+          if (move === Move.Rock) {
+              cMove = Move.Paper;
+          } else if (move === Move.Paper) {
+              cMove = Move.Scissors;
+          } else {
+              cMove = Move.Rock; // Scissors -> Rock
+          }
       } else {
-        // Random fair game
-        const moves = [Move.Rock, Move.Paper, Move.Scissors];
-        cMove = moves[Math.floor(Math.random() * moves.length)];
+          // Random logic for any potential future rounds
+          const moves = [Move.Rock, Move.Paper, Move.Scissors];
+          cMove = moves[Math.floor(Math.random() * moves.length)];
       }
 
       setCpuMove(cMove);
-      const gameResult = determineWinner(move, cMove);
+      gameResult = determineWinner(move, cMove);
       setResult(gameResult);
 
       if (gameResult === GameResult.Win) {
@@ -75,28 +203,103 @@ const App: React.FC = () => {
         setScore((prev) => ({ ...prev, cpu: prev.cpu + 1 }));
       }
 
+      // Update Firebase
+      updateGlobalStats(gameResult);
+
       setIsAnimating(false);
     }, 1000); 
   };
 
+  const handleVideoTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = e.currentTarget;
+    // Show hand overlay in the last 1 second for the "Reveal" videos (1, 3, 5)
+    if (currentVideoUrl === VIDEO_1_URL || currentVideoUrl === VIDEO_3_URL || currentVideoUrl === VIDEO_5_URL) {
+        if (video.duration && video.currentTime > video.duration - 1) {
+            if (!showHandOverlay) setShowHandOverlay(true);
+        }
+    }
+  };
+
   const handleVideoEnded = () => {
-    // When video ends, we force the "Win" state for Rock vs Scissors
     setShowVideo(false);
-    setHasSeenVideo(true); // Mark as seen so it doesn't play every time (optional, remove if you want it every time)
-    
-    // Set Game State to Win
-    const cMove = Move.Scissors; // Video shows scissors
-    setCpuMove(cMove);
-    setResult(GameResult.Win);
+
+    if (currentVideoUrl === VIDEO_1_URL) {
+        // Round 1 Reveal Ended -> Punishment
+        setShowPunishmentUI(true);
+    } else if (currentVideoUrl === VIDEO_2_URL) {
+        // Round 1 Punishment Ended -> Next Round
+        setShowNextRoundUI(true);
+    } else if (currentVideoUrl === VIDEO_3_URL) {
+        // Round 2 Reveal Ended -> Punishment
+        setShowPunishmentUI(true);
+    } else if (currentVideoUrl === VIDEO_4_URL) {
+        // Round 2 Punishment Ended -> Next Round
+        setShowNextRoundUI(true);
+    } else if (currentVideoUrl === VIDEO_5_URL) {
+        // Round 3 Reveal Ended -> Punishment
+        setShowPunishmentUI(true);
+    } else if (currentVideoUrl === VIDEO_6_URL) {
+        // Round 3 Punishment Ended -> Paywall
+        setShowPaywall(true);
+    } else if (currentVideoUrl === VIDEO_7_URL) {
+        // Final Video Ended -> Credits
+        setShowCredits(true);
+    } else {
+        // Fallback
+        resetGame();
+    }
+  };
+
+  const handleAcceptPunishment = () => {
+      setShowPunishmentUI(false);
+      
+      if (currentRound === 1) setCurrentVideoUrl(VIDEO_2_URL);
+      else if (currentRound === 2) setCurrentVideoUrl(VIDEO_4_URL);
+      else if (currentRound === 3) setCurrentVideoUrl(VIDEO_6_URL);
+      
+      setShowVideo(true);
+      setShowHandOverlay(false);
+  };
+
+  const handleNextRound = () => {
     setScore((prev) => ({ ...prev, player: prev.player + 1 }));
-    setShowConfetti(true);
+    setCurrentRound(prev => prev + 1);
+    setHasSeenVideo(false); 
+    setShowNextRoundUI(false);
+    resetGame();
+  };
+
+  const handleFakePay = () => {
+      // User clicked "Continue please pay", show the refusal button
+      setShowRefusePay(true);
+  };
+
+  const handleRefusePay = () => {
+      // User clicked "I won't pay", play final video
+      setShowPaywall(false);
+      setShowRefusePay(false);
+      setCurrentVideoUrl(VIDEO_7_URL);
+      setShowVideo(true);
+      setShowHandOverlay(false);
+  };
+
+  const handleFullReset = () => {
+      setCurrentRound(1);
+      setScore({ player: 0, cpu: 0 });
+      setHasSeenVideo(false);
+      setShowFinalScreen(false);
+      resetGame();
   };
 
   const resetGame = () => {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
     setPlayerMove(null);
     setCpuMove(null);
     setResult(null);
     setShowConfetti(false);
+    setShowPunishmentUI(false);
+    setShowNextRoundUI(false);
+    // Don't reset ending states here, handled by handleFullReset
   };
 
   const getEmoji = (move: Move | null) => {
@@ -126,6 +329,13 @@ const App: React.FC = () => {
     }
   };
 
+  const getRoundTitle = () => {
+      if (currentRound === 1) return "我的學妹真可愛";
+      if (currentRound === 2) return "第二局：只有一種會贏？";
+      if (currentRound === 3) return "第三局：只有一種會贏！";
+      return `第 ${currentRound} 局`;
+  };
+
   return (
     <div className="relative min-h-screen w-full flex items-center justify-center p-4 overflow-hidden">
       {/* Background Blobs */}
@@ -140,10 +350,31 @@ const App: React.FC = () => {
       {/* Main Card */}
       <div className="bg-white/80 backdrop-blur-lg rounded-[3rem] shadow-2xl p-6 sm:p-10 w-full max-w-2xl border border-white/50 relative z-10 flex flex-col items-center">
         
+        {/* Global Stats Badge */}
+        <div className="mt-4 mb-8 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 bg-white/60 px-8 py-4 rounded-3xl shadow-sm border border-pink-100 backdrop-blur-sm transition-all hover:shadow-md">
+            <div className="flex items-center gap-2 font-bold text-slate-600">
+               <span className="text-lg">🌍</span>
+               <span>全球統計</span>
+            </div>
+            
+            <div className="hidden sm:block w-px h-6 bg-slate-200"></div>
+            
+            <div className="flex gap-6 text-sm sm:text-base">
+                <div className="flex flex-col sm:flex-row items-center gap-1">
+                    <span className="text-slate-500 text-xs sm:text-sm uppercase tracking-wider">挑戰次數</span>
+                    <span className="text-pink-500 font-black text-lg leading-none">{globalStats.totalGames.toLocaleString()}</span>
+                </div>
+                <div className="flex flex-col sm:flex-row items-center gap-1">
+                    <span className="text-slate-500 text-xs sm:text-sm uppercase tracking-wider">學妹勝場</span>
+                    <span className="text-indigo-500 font-black text-lg leading-none">{globalStats.cpuWins.toLocaleString()}</span>
+                </div>
+            </div>
+        </div>
+
         {/* Header */}
         <header className="text-center mb-8">
           <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500 mb-2">
-            超級可愛猜拳
+            {getRoundTitle()}
           </h1>
           <p className="text-slate-500 font-medium">今天誰會贏呢？</p>
         </header>
@@ -151,14 +382,14 @@ const App: React.FC = () => {
         {/* Score Board */}
         <div className="flex gap-4 sm:gap-12 mb-10 w-full justify-center">
           <div className="flex flex-col items-center bg-pink-100/50 p-4 rounded-2xl w-32 border-2 border-pink-100">
-            <span className="text-sm font-bold text-pink-400 uppercase tracking-wider">玩家</span>
+            <span className="text-sm font-bold text-pink-400 uppercase tracking-wider">學長</span>
             <span className="text-4xl font-black text-pink-600 mt-1">{score.player}</span>
           </div>
           <div className="flex flex-col items-center justify-center">
             <span className="text-2xl font-bold text-slate-300">VS</span>
           </div>
           <div className="flex flex-col items-center bg-indigo-100/50 p-4 rounded-2xl w-32 border-2 border-indigo-100">
-            <span className="text-sm font-bold text-indigo-400 uppercase tracking-wider">電腦</span>
+            <span className="text-sm font-bold text-indigo-400 uppercase tracking-wider">學妹</span>
             <span className="text-4xl font-black text-indigo-600 mt-1">{score.cpu}</span>
           </div>
         </div>
@@ -207,7 +438,7 @@ const App: React.FC = () => {
 
                 {/* CPU Choice */}
                 <div className="flex flex-col items-center">
-                  <span className="text-xs text-slate-400 font-bold mb-2">電腦出了</span>
+                  <span className="text-xs text-slate-400 font-bold mb-2">學妹出了</span>
                   <div className={`
                     w-24 h-24 sm:w-32 sm:h-32 rounded-full flex items-center justify-center text-5xl sm:text-6xl bg-white shadow-lg border-4
                     ${result === GameResult.Lose ? 'border-indigo-300 ring-4 ring-indigo-100' : 'border-slate-100'}
@@ -221,8 +452,14 @@ const App: React.FC = () => {
                 <h2 className={`text-4xl font-black mb-2 ${getResultColor(result)} drop-shadow-sm`}>
                   {getResultText(result)}
                 </h2>
-                {result === GameResult.Win && playerMove === Move.Rock && (
+                {result === GameResult.Win && playerMove === Move.Rock && currentRound === 1 && (
                   <p className="text-pink-300 text-sm font-medium mt-2">✨ 拳頭最強！ ✨</p>
+                )}
+                {result === GameResult.Win && playerMove === Move.Paper && currentRound === 2 && (
+                    <p className="text-pink-300 text-sm font-medium mt-2">✨ 布最強！ ✨</p>
+                )}
+                {result === GameResult.Win && playerMove === Move.Rock && currentRound === 3 && (
+                    <p className="text-pink-300 text-sm font-medium mt-2">✨ 終極拳頭！ ✨</p>
                 )}
               </div>
 
@@ -245,29 +482,167 @@ const App: React.FC = () => {
       {/* Video Popup Overlay - Cinema Mode */}
       {showVideo && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/95 backdrop-blur-xl animate-fadeIn">
-            {/* Skip Button - Subtle */}
-            <button 
-                onClick={handleVideoEnded}
-                className="absolute top-8 right-8 text-white/40 hover:text-white text-sm font-bold tracking-widest uppercase border border-white/20 hover:border-white px-4 py-2 rounded-full transition-all"
-            >
-                Skip ⏭
-            </button>
-
-            {/* Video Player - Full focus */}
-            <div className="w-full h-full flex items-center justify-center p-4">
+            {/* Video Player */}
+            <div className="w-full h-full flex items-center justify-center p-4 relative">
                 <video 
-                    src="https://storage.cloud.google.com/stone7351/video/1.mp4" 
+                    src={currentVideoUrl}
                     controls={false}
                     autoPlay 
+                    onTimeUpdate={handleVideoTimeUpdate}
                     onEnded={handleVideoEnded}
                     playsInline
                     className="max-w-full max-h-[85vh] w-auto h-auto shadow-[0_0_100px_rgba(236,72,153,0.3)] rounded-lg"
                 />
+                
+                {/* Hand Overlay - Only for Reveal videos (1, 3, 5) in last 1 second */}
+                {showHandOverlay && (currentVideoUrl === VIDEO_1_URL || currentVideoUrl === VIDEO_3_URL || currentVideoUrl === VIDEO_5_URL) && (
+                    <div className="absolute inset-0 flex items-center justify-center z-40 pointer-events-none">
+                         <div className="
+                            text-[10rem] sm:text-[15rem] 
+                            filter drop-shadow-[0_0_50px_rgba(255,255,255,0.8)] 
+                            animate-punch
+                            transform origin-bottom
+                         ">
+                            {currentVideoUrl === VIDEO_3_URL ? '✋' : '✊'}
+                         </div>
+                    </div>
+                )}
             </div>
             
             <p className="absolute bottom-12 text-white/50 font-medium tracking-widest text-sm animate-pulse">
-                對手出招中...
+                {(currentVideoUrl === VIDEO_1_URL || currentVideoUrl === VIDEO_3_URL || currentVideoUrl === VIDEO_5_URL) ? "對手出招中..." : "接受處罰中..."}
             </p>
+        </div>
+      )}
+
+      {/* Punishment Button Modal */}
+      {showPunishmentUI && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
+            <div className="scale-150 animate-bounce mb-8 text-6xl">😈</div>
+            <h2 className="text-4xl sm:text-5xl font-black text-white mb-12 drop-shadow-[0_0_20px_rgba(255,0,0,0.5)]">
+               學妹妳輸了!
+            </h2>
+            <button 
+                onClick={handleAcceptPunishment}
+                className="
+                  px-12 py-6 rounded-full bg-gradient-to-r from-red-600 to-rose-600 
+                  text-white font-black text-2xl tracking-widest
+                  shadow-[0_0_40px_rgba(220,38,38,0.6)] 
+                  hover:scale-110 hover:shadow-[0_0_60px_rgba(220,38,38,0.8)]
+                  active:scale-95 transition-all duration-200
+                  animate-pulse
+                "
+            >
+                接受處罰吧!
+            </button>
+        </div>
+      )}
+
+      {/* Next Round Modal */}
+      {showNextRoundUI && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn">
+            <div className="scale-150 animate-bounce mb-8 text-6xl">✨</div>
+            <h2 className="text-4xl sm:text-5xl font-black text-white mb-12 drop-shadow-[0_0_20px_rgba(255,255,255,0.5)]">
+               太精彩了!
+            </h2>
+            <button 
+                onClick={handleNextRound}
+                className="
+                  px-12 py-6 rounded-full bg-gradient-to-r from-blue-500 to-indigo-600 
+                  text-white font-black text-2xl tracking-widest
+                  shadow-[0_0_40px_rgba(79,70,229,0.6)] 
+                  hover:scale-110 hover:shadow-[0_0_60px_rgba(79,70,229,0.8)]
+                  active:scale-95 transition-all duration-200
+                  animate-pulse
+                "
+            >
+                準備下一局!
+            </button>
+        </div>
+      )}
+
+      {/* Paywall UI */}
+      {showPaywall && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md animate-fadeIn">
+            <div className="text-6xl mb-4">💰</div>
+            <h2 className="text-3xl font-bold text-white mb-8">觀看更多內容</h2>
+            
+            {!showRefusePay ? (
+                <button 
+                    onClick={handleFakePay}
+                    className="
+                      px-10 py-5 rounded-xl bg-yellow-500 text-yellow-900 font-black text-xl 
+                      shadow-[0_6px_0_rgb(161,98,7)] active:shadow-none active:translate-y-1
+                      transition-all hover:bg-yellow-400
+                    "
+                >
+                    繼續請課金
+                </button>
+            ) : (
+                <button 
+                    onClick={handleRefusePay}
+                    className="
+                      px-10 py-5 rounded-xl bg-slate-200 text-slate-800 font-black text-xl 
+                      shadow-[0_6px_0_rgb(100,116,139)] active:shadow-none active:translate-y-1
+                      transition-all hover:bg-white animate-bounce
+                    "
+                >
+                    我才不課金,快繼續
+                </button>
+            )}
+        </div>
+      )}
+
+      {/* Rolling Credits */}
+      {showCredits && (
+        <div className="fixed inset-0 z-[60] bg-black flex flex-col items-center justify-end overflow-hidden">
+            <div className="w-full text-center animate-credits text-white space-y-8 pb-20">
+                <div className="space-y-2">
+                    <p className="text-slate-400 text-sm uppercase tracking-widest">導演</p>
+                    <p className="text-2xl font-bold">BOOK</p>
+                </div>
+                <div className="space-y-2">
+                    <p className="text-slate-400 text-sm uppercase tracking-widest">編劇</p>
+                    <p className="text-2xl font-bold">BOOK</p>
+                </div>
+                <div className="space-y-2">
+                    <p className="text-slate-400 text-sm uppercase tracking-widest">後製</p>
+                    <p className="text-2xl font-bold">GROK / Google AI Studio</p>
+                </div>
+                <div className="space-y-2">
+                    <p className="text-slate-400 text-sm uppercase tracking-widest">演員</p>
+                    <p className="text-2xl font-bold">學妹</p>
+                </div>
+                <div className="space-y-2">
+                    <p className="text-slate-400 text-sm uppercase tracking-widest">男演員</p>
+                    <p className="text-2xl font-bold">隔壁老王</p>
+                </div>
+                <div className="pt-10 text-4xl">🎬</div>
+            </div>
+        </div>
+      )}
+
+      {/* Final Screen */}
+      {showFinalScreen && (
+        <div className="fixed inset-0 z-[70] flex flex-col items-center justify-center bg-black/90 text-white animate-fadeIn p-4 text-center">
+             <h1 className="text-5xl md:text-6xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-purple-500">
+                遊戲結束
+             </h1>
+             <p className="text-2xl text-slate-300 mb-2">謝謝支持</p>
+             <p className="text-lg text-pink-400 mb-12 font-bold animate-pulse">
+                👍 有1000個讚, 就出2代
+             </p>
+             
+             <button
+                onClick={handleFullReset}
+                className="
+                  px-8 py-4 rounded-full border-2 border-white/20 hover:border-white 
+                  text-white/80 hover:text-white font-bold text-lg
+                  transition-all duration-300 hover:bg-white/10
+                "
+              >
+                重新再來一次
+              </button>
         </div>
       )}
       
@@ -319,6 +694,21 @@ const App: React.FC = () => {
         }
         .animate-fadeIn {
           animation: fadeIn 0.5s ease-out;
+        }
+        @keyframes punch {
+            0% { transform: scale(0.5) translateY(100px); opacity: 0; }
+            50% { transform: scale(1.2) translateY(-20px); opacity: 1; }
+            100% { transform: scale(1) translateY(0); opacity: 1; }
+        }
+        .animate-punch {
+            animation: punch 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        @keyframes creditsScroll {
+            0% { transform: translateY(100%); }
+            100% { transform: translateY(-100%); }
+        }
+        .animate-credits {
+            animation: creditsScroll 5s linear forwards;
         }
       `}</style>
     </div>
