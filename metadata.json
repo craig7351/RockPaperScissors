@@ -1,0 +1,5 @@
+{
+  "name": "RockPaperScissors",
+  "description": "A lovable and colorful Rock-Paper-Scissors game where Rock always wins!",
+  "requestFramePermissions": []
+}
