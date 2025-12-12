@@ -4,15 +4,34 @@ import { MoveButton } from './components/MoveButton';
 import { db } from './firebase';
 import { doc, onSnapshot, updateDoc, setDoc, increment } from 'firebase/firestore';
 
-const VIDEO_1_URL = "https://storage.cloud.google.com/stone7351/video/1.mp4";
-const VIDEO_2_URL = "https://storage.cloud.google.com/stone7351/video/2.mp4";
-const VIDEO_3_URL = "https://storage.cloud.google.com/stone7351/video/3.mp4";
-const VIDEO_4_URL = "https://storage.cloud.google.com/stone7351/video/4.mp4";
-const VIDEO_5_URL = "https://storage.cloud.google.com/stone7351/video/5.mp4";
-const VIDEO_6_URL = "https://storage.cloud.google.com/stone7351/video/6.mp4";
-const VIDEO_7_URL = "https://storage.cloud.google.com/stone7351/video/7.mp4";
+const INTRO_IMAGE_URL = "https://storage.googleapis.com/stone7351/image/1.jpg";
+
+const VIDEO_1_URL = "https://storage.googleapis.com/stone7351/video/1.mp4";
+const VIDEO_2_URL = "https://storage.googleapis.com/stone7351/video/2.mp4";
+const VIDEO_3_URL = "https://storage.googleapis.com/stone7351/video/3.mp4";
+const VIDEO_4_URL = "https://storage.googleapis.com/stone7351/video/4.mp4";
+const VIDEO_5_URL = "https://storage.googleapis.com/stone7351/video/5.mp4";
+const VIDEO_6_URL = "https://storage.googleapis.com/stone7351/video/6.mp4";
+const VIDEO_7_URL = "https://storage.googleapis.com/stone7351/video/7.mp4";
+
+// Galgame Script
+const INTRO_SCRIPT = [
+  "學長... 你終於來了...",
+  "人家在這裡等你好久了呢 (臉紅)",
+  "那個... 雖然有點突然...",
+  "今天，我想跟學長玩個遊戲...",
+  "如果學長贏了...",
+  "學妹什麼都聽你的喔... ///",
+  "準備好了嗎？ 要開始囉！"
+];
 
 const App: React.FC = () => {
+  // Game Phase State: 'title' | 'intro' | 'main'
+  const [gamePhase, setGamePhase] = useState<'title' | 'intro' | 'main'>('title');
+  const [dialogueIndex, setDialogueIndex] = useState(0);
+  const [displayedText, setDisplayedText] = useState('');
+
+  // Main Game State
   const [currentRound, setCurrentRound] = useState<number>(1); // 1, 2, 3...
   const [score, setScore] = useState<ScoreState>({ player: 0, cpu: 0 });
   const [playerMove, setPlayerMove] = useState<Move | null>(null);
@@ -36,9 +55,12 @@ const App: React.FC = () => {
   const [showFinalScreen, setShowFinalScreen] = useState(false);
 
   // Global Stats State
-  const [globalStats, setGlobalStats] = useState({ totalGames: 0, cpuWins: 0 });
+  const [globalStats, setGlobalStats] = useState({ totalGames: 0, cpuWins: 0, visitorCount: 0 });
   
   const resetTimerRef = useRef<number | null>(null);
+  const hasIncrementedVisit = useRef(false);
+  const typewriterRef = useRef<number | null>(null);
+  const voiceRef = useRef<HTMLAudioElement | null>(null);
 
   // Background blobs for aesthetic
   const blobs = [
@@ -51,8 +73,75 @@ const App: React.FC = () => {
   useEffect(() => {
     return () => {
       if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+      if (typewriterRef.current) clearTimeout(typewriterRef.current);
+      if (voiceRef.current) voiceRef.current.pause();
     };
   }, []);
+
+  // Galgame Typewriter Effect
+  useEffect(() => {
+    if (gamePhase !== 'intro') return;
+
+    const fullText = INTRO_SCRIPT[dialogueIndex];
+    setDisplayedText('');
+    let charIndex = 0;
+
+    const typeChar = () => {
+      if (charIndex < fullText.length) {
+        setDisplayedText(fullText.slice(0, charIndex + 1));
+        charIndex++;
+        typewriterRef.current = window.setTimeout(typeChar, 50); // Typing speed
+      }
+    };
+
+    typeChar();
+
+    return () => {
+      if (typewriterRef.current) clearTimeout(typewriterRef.current);
+    };
+  }, [dialogueIndex, gamePhase]);
+
+  // Galgame Voice Playback
+  useEffect(() => {
+    if (gamePhase === 'intro') {
+        // Stop previous audio
+        if (voiceRef.current) {
+            voiceRef.current.pause();
+            voiceRef.current.currentTime = 0;
+        }
+
+        // Play new audio based on index (01.mp3, 02.mp3...)
+        const audioIndex = dialogueIndex + 1;
+        const formattedIndex = audioIndex.toString().padStart(2, '0');
+        const audioUrl = `https://storage.googleapis.com/stone7351/mp3/${formattedIndex}.mp3`;
+        
+        console.log(`[Voice Debug] Index: ${dialogueIndex}, Audio File: ${formattedIndex}.mp3`);
+        console.log(`[Voice Debug] Attempting to play URL: ${audioUrl}`);
+
+        const audio = new Audio(audioUrl);
+        voiceRef.current = audio;
+        
+        const playPromise = audio.play();
+        
+        if (playPromise !== undefined) {
+            playPromise
+                .then(() => {
+                    console.log(`[Voice Debug] Success! Playing ${formattedIndex}.mp3`);
+                })
+                .catch(err => {
+                    console.error(`[Voice Debug] Failed to play ${formattedIndex}.mp3:`, err);
+                    if (err.name === 'NotAllowedError') {
+                        console.warn("[Voice Debug] NOTE: Browser blocked autoplay. User must interact (click) with the page first.");
+                    }
+                });
+        }
+    } else {
+        // Cleanup when leaving intro
+        if (voiceRef.current) {
+            voiceRef.current.pause();
+        }
+    }
+  }, [dialogueIndex, gamePhase]);
 
   // Handle Credits Timer
   useEffect(() => {
@@ -65,6 +154,31 @@ const App: React.FC = () => {
     }
   }, [showCredits]);
 
+  // Record Visitor (Increment on Mount)
+  useEffect(() => {
+    if (hasIncrementedVisit.current) return;
+    hasIncrementedVisit.current = true;
+
+    const incrementVisit = async () => {
+         const statsDocRef = doc(db, 'RockPaper_Stats', 'summary');
+         try {
+             await updateDoc(statsDocRef, { visitorCount: increment(1) });
+         } catch (e: any) {
+             if (e.code === 'not-found') {
+                 // Create if doesn't exist
+                 try {
+                    await setDoc(statsDocRef, { visitorCount: 1, totalGames: 0, cpuWins: 0 });
+                 } catch (err) {
+                    console.warn("Failed to create stats doc on visit:", err);
+                 }
+             } else {
+                 console.warn("Failed to increment visitor count:", e);
+             }
+         }
+    };
+    incrementVisit();
+  }, []);
+
   // Firebase Global Stats Subscription
   useEffect(() => {
     const statsDocRef = doc(db, 'RockPaper_Stats', 'summary');
@@ -75,18 +189,17 @@ const App: React.FC = () => {
           const data = docSnap.data();
           setGlobalStats({
               totalGames: data.totalGames || 0,
-              cpuWins: data.cpuWins || 0
+              cpuWins: data.cpuWins || 0,
+              visitorCount: data.visitorCount || 0
           });
         } else {
           // Initialize if missing
-          // Use catch to prevent unhandled promise rejection if permissions are missing
-          setDoc(statsDocRef, { totalGames: 0, cpuWins: 0 }).catch(err => {
+          setDoc(statsDocRef, { totalGames: 0, cpuWins: 0, visitorCount: 1 }).catch(err => {
              console.warn("Failed to initialize stats (likely permission issue):", err);
           });
         }
       },
       (error) => {
-        // Gracefully handle permission errors
         console.warn("Firebase stats subscription error (likely permission issue):", error.message);
       }
     );
@@ -106,18 +219,8 @@ const App: React.FC = () => {
     try {
         await updateDoc(statsDocRef, updates);
     } catch (e: any) {
-        if (e.code === 'not-found') {
-             try {
-               await setDoc(statsDocRef, { 
-                   totalGames: 1, 
-                   cpuWins: gameResult === GameResult.Lose ? 1 : 0 
-               });
-             } catch (createError) {
-               console.warn("Failed to create stats doc:", createError);
-             }
-        } else {
-            console.warn("Failed to update stats:", e);
-        }
+        // Error handling already covered in logic or swallowed if transient
+        console.warn("Failed to update game stats:", e);
     }
   };
 
@@ -283,7 +386,14 @@ const App: React.FC = () => {
       setShowHandOverlay(false);
   };
 
+  const handleStartGame = () => {
+      setGamePhase('intro');
+  };
+
   const handleFullReset = () => {
+      setGamePhase('title');
+      setDialogueIndex(0);
+      setDisplayedText('');
       setCurrentRound(1);
       setScore({ player: 0, cpu: 0 });
       setHasSeenVideo(false);
@@ -300,6 +410,22 @@ const App: React.FC = () => {
     setShowPunishmentUI(false);
     setShowNextRoundUI(false);
     // Don't reset ending states here, handled by handleFullReset
+  };
+
+  const handleIntroClick = () => {
+      if (dialogueIndex < INTRO_SCRIPT.length - 1) {
+          // If text hasn't finished typing, finish it instantly
+          const fullText = INTRO_SCRIPT[dialogueIndex];
+          if (displayedText !== fullText) {
+              if (typewriterRef.current) clearTimeout(typewriterRef.current);
+              setDisplayedText(fullText);
+          } else {
+              setDialogueIndex(prev => prev + 1);
+          }
+      } else {
+          // Transition to Main Game
+          setGamePhase('main');
+      }
   };
 
   const getEmoji = (move: Move | null) => {
@@ -347,30 +473,105 @@ const App: React.FC = () => {
         />
       ))}
 
-      {/* Main Card */}
-      <div className="bg-white/80 backdrop-blur-lg rounded-[3rem] shadow-2xl p-6 sm:p-10 w-full max-w-2xl border border-white/50 relative z-10 flex flex-col items-center">
-        
-        {/* Global Stats Badge */}
-        <div className="mt-4 mb-8 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 bg-white/60 px-8 py-4 rounded-3xl shadow-sm border border-pink-100 backdrop-blur-sm transition-all hover:shadow-md">
-            <div className="flex items-center gap-2 font-bold text-slate-600">
-               <span className="text-lg">🌍</span>
-               <span>全球統計</span>
+      {/* Global Stats Badge - Single Row Layout (Only show in Game Phase) */}
+      {gamePhase === 'main' && (
+        <div className="absolute top-4 left-4 z-20 bg-white/60 backdrop-blur-md border border-white/40 px-4 py-2 rounded-full shadow-sm hover:shadow-md transition-all animate-fadeIn">
+            <div className="flex items-center gap-3 text-xs sm:text-sm">
+               <div className="flex items-center gap-1 font-bold text-slate-700">
+                   <span>🌍</span>
+                   <span className="hidden sm:inline">全球統計</span>
+               </div>
+               <div className="w-px h-3 bg-slate-400/50"></div>
+               <div className="flex items-center gap-1">
+                  <span className="text-slate-500">幾個學長</span>
+                  <span className="text-pink-600 font-bold">{globalStats.visitorCount.toLocaleString()}</span>
+               </div>
+               <div className="w-px h-3 bg-slate-400/50"></div>
+               <div className="flex items-center gap-1">
+                  <span className="text-slate-500">學妹勝場</span>
+                  <span className="text-indigo-600 font-bold">{globalStats.cpuWins.toLocaleString()}</span>
+               </div>
             </div>
-            
-            <div className="hidden sm:block w-px h-6 bg-slate-200"></div>
-            
-            <div className="flex gap-6 text-sm sm:text-base">
-                <div className="flex flex-col sm:flex-row items-center gap-1">
-                    <span className="text-slate-500 text-xs sm:text-sm uppercase tracking-wider">挑戰次數</span>
-                    <span className="text-pink-500 font-black text-lg leading-none">{globalStats.totalGames.toLocaleString()}</span>
+        </div>
+      )}
+
+      {/* 
+        ================================================================
+        TITLE SCREEN
+        ================================================================
+      */}
+      {gamePhase === 'title' && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-white/30 backdrop-blur-sm animate-fadeIn">
+            <div className="relative z-10 text-center p-8 rounded-3xl">
+                <h1 className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-rose-400 mb-12 drop-shadow-sm text-center leading-tight tracking-tight">
+                    我的學妹<br/>真可愛
+                </h1>
+                
+                <button
+                    onClick={handleStartGame}
+                    className="
+                        px-12 py-6 rounded-full bg-slate-800 text-white font-bold text-2xl tracking-widest
+                        shadow-[0_0_20px_rgba(236,72,153,0.5)] border-4 border-transparent
+                        hover:scale-110 hover:bg-slate-700 hover:shadow-[0_0_30px_rgba(236,72,153,0.8)]
+                        active:scale-95 transition-all duration-300
+                        animate-bounce
+                    "
+                >
+                    遊戲開始
+                </button>
+                <p className="mt-12 text-slate-500 font-medium text-sm animate-pulse">請開啟音效以獲得最佳體驗 🔊</p>
+            </div>
+        </div>
+      )}
+
+      {/* 
+        ================================================================
+        INTRO PHASE (Galgame Mode)
+        ================================================================
+      */}
+      {gamePhase === 'intro' && (
+        <div 
+            onClick={handleIntroClick}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-pink-50/50 cursor-pointer animate-fadeIn"
+        >
+            <div className="relative w-full max-w-md h-[80vh] bg-white rounded-3xl overflow-hidden shadow-2xl border-4 border-white">
+                {/* Character Image */}
+                <div className="absolute inset-0 bg-gray-100">
+                    <img 
+                        src={INTRO_IMAGE_URL} 
+                        alt="Cute Junior" 
+                        className="w-full h-full object-cover"
+                    />
                 </div>
-                <div className="flex flex-col sm:flex-row items-center gap-1">
-                    <span className="text-slate-500 text-xs sm:text-sm uppercase tracking-wider">學妹勝場</span>
-                    <span className="text-indigo-500 font-black text-lg leading-none">{globalStats.cpuWins.toLocaleString()}</span>
+
+                {/* Gradient Overlay for text readability */}
+                <div className="absolute bottom-0 left-0 right-0 h-1/2 bg-gradient-to-t from-black/80 to-transparent pointer-events-none"></div>
+
+                {/* Dialogue Box */}
+                <div className="absolute bottom-6 left-4 right-4 bg-white/90 backdrop-blur-md p-6 rounded-2xl shadow-lg border-2 border-pink-100 min-h-[140px] flex flex-col justify-start items-start">
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="bg-pink-500 text-white text-xs font-bold px-2 py-1 rounded-full">學妹</span>
+                    </div>
+                    <p className="text-slate-800 text-lg font-medium leading-relaxed">
+                        {displayedText}
+                        <span className="animate-pulse inline-block ml-1">_</span>
+                    </p>
+                    <div className="absolute bottom-4 right-4 text-slate-400 text-xs animate-bounce">
+                        點擊繼續 ▼
+                    </div>
                 </div>
             </div>
         </div>
+      )}
 
+      {/* 
+        ================================================================
+        MAIN GAME PHASE
+        ================================================================
+      */}
+      {gamePhase === 'main' && (
+      <div className="bg-white/80 backdrop-blur-lg rounded-[3rem] shadow-2xl p-6 sm:p-10 w-full max-w-2xl border border-white/50 relative z-10 flex flex-col items-center animate-fadeIn">
+        
         {/* Header */}
         <header className="text-center mb-8">
           <h1 className="text-3xl sm:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-500 mb-2">
@@ -478,6 +679,7 @@ const App: React.FC = () => {
           )}
         </div>
       </div>
+      )}
 
       {/* Video Popup Overlay - Cinema Mode */}
       {showVideo && (
